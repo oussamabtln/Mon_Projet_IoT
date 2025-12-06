@@ -1,87 +1,81 @@
-from django.http import HttpResponse
-from django.http import JsonResponse
-from django.utils import timezone
-from .models import Dht11
-import csv
-from .serializers import DHT11serialize
+import joblib
+import os
 from django.shortcuts import render
+from django.http import JsonResponse
+from django.conf import settings
 from .models import Dht11
 
-def graphique(request):
-    data = Dht11.objects.all()
-    return render(request, 'chart.html', {'data': data})
+# Chemin vers le fichier du modèle IA
+MODEL_PATH = os.path.join(settings.BASE_DIR, 'weather_model.joblib')
 
-def test(request):
-    return HttpResponse('IoT Project')
 
-def table(request):
-    derniere_ligne = Dht11.objects.last()
-    derniere_date = Dht11.objects.last().dt
-    delta_temps = timezone.now()
-    difference_minutes = delta_temps.seconds // 60
-    temps_ecoule = ' il y a ' + str(difference_minutes) + ' min'
-    if difference_minutes> 60:
-        temps_ecoule = ('il y ' + str(difference_minutes // 60) + 'h' +
-                        str(difference_minutes % 60) + 'min')
-        valeurs = {'date': temps_ecoule, 'id': derniere_ligne.id, 'temp':
-            derniere_ligne.temp, 'hum': derniere_ligne.hum}
-        return render(request, 'value.html', {'valeurs': valeurs})
-
-def download_csv(request):
-    # Create the HTTP response with CSV content type
-    response = HttpResponse(content_type='text/csv')
-    response['Content-Disposition'] = 'attachment; filename="dht.csv"'
-
-    # Create a CSV writer
-    writer = csv.writer(response)
-
-    # Write header row
-    writer.writerow(['id', 'temp', 'hum', 'dt'])
-
-    # Query all Dht11 objects and extract desired fields
-    model_values = Dht11.objects.values_list('id', 'temp', 'hum', 'dt')
-
-    # Write data rows
-    for row in model_values:
-        writer.writerow(row)
-
-    return response
 def dashboard(request):
-    # Rend juste la page; les données sont chargées via JS
-    return render(request, "dashboard.html")
+    return render(request, 'dashboard.html')
 
 
-# Dans DHT/views.py
+def graph_temp(request): return render(request, 'graph_temp.html')
+
+
+def graph_hum(request): return render(request, 'graph_hum.html')
+
+
+def graph_co(request): return render(request, 'graph_co.html')
+
+
+def graph_light(request): return render(request, 'graph_light.html')
+
+
+def download_csv(request): pass  # À compléter si besoin
+
 
 def latest_json(request):
-    # 1. On récupère les 2 dernières mesures (la plus récente et celle d'avant)
-    data = Dht11.objects.order_by('-dt').values('temp', 'hum', 'dt')[:2]
-    data_list = list(data)
+    # 1. Récupérer la dernière donnée reçue
+    current = Dht11.objects.order_by('-dt').first()
 
-    # Sécurité si la base de données est vide
-    if not data_list:
-        return JsonResponse({"detail": "Pas de données"}, status=404)
+    if not current:
+        return JsonResponse({"error": "Pas de données"}, status=404)
 
-    # La mesure actuelle (Indice 0)
-    current = data_list[0]
+    # Récupérer la donnée précédente pour les flèches de tendance
+    previous = Dht11.objects.order_by('-dt')[1] if Dht11.objects.count() > 1 else None
 
-    # La mesure précédente (Indice 1) - on vérifie qu'elle existe
-    previous = data_list[1] if len(data_list) > 1 else None
+    # 2. PRÉDICTION IA
+    prediction = "Analyse..."
 
-    # 2. On renvoie tout en JSON
+    if os.path.exists(MODEL_PATH):
+        try:
+            # On charge le cerveau
+            model = joblib.load(MODEL_PATH)
+
+            # On prépare les 4 valeurs pour l'IA : [Temp, Hum, CO, Light]
+            # (On met 0 si une valeur est manquante pour éviter le crash)
+            X_input = [[
+                current.temp if current.temp is not None else 0,
+                current.hum if current.hum is not None else 0,
+                current.co if current.co is not None else 0,
+                current.light if current.light is not None else 0
+            ]]
+
+            # L'IA fait sa prédiction
+            prediction = model.predict(X_input)[0]
+
+        except Exception as e:
+            print(f"Erreur IA : {e}")
+            prediction = "Erreur IA"
+    else:
+        prediction = "Modèle non trouvé"
+
+    # 3. Envoi de la réponse au site
     return JsonResponse({
-        "temperature": current["temp"],
-        "humidity": current["hum"],
-        "timestamp": current["dt"].isoformat(),
-        # C'est ici qu'on envoie les anciennes valeurs pour les flèches !
-        "prev_temp": previous["temp"] if previous else None,
-        "prev_hum": previous["hum"] if previous else None
-    })
-def graph_temp(request):
-    # On change 'graph_temp.html' par 'graph_temp.html'
-    return render(request, 'graph_temp.html')
+        "temperature": current.temp,
+        "humidity": current.hum,
+        "co": current.co,
+        "light": current.light,
+        "timestamp": current.dt.strftime("%H:%M:%S"),
 
-def graph_hum(request):
-    # Étape 2 : Affiche la page graphique Humidité (C'est celle qu'il manquait !)
-    return render(request, 'graph_hum.html')
-# Create your views here.
+        "prev_temp": previous.temp if previous else None,
+        "prev_hum": previous.hum if previous else None,
+        "prev_co": previous.co if previous else None,
+        "prev_light": previous.light if previous else None,
+
+        "prediction": prediction  # <--- Le résultat de l'IA (ex: "Incendie", "Pluie")
+    })
